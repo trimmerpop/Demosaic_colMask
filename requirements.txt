@@ -1,0 +1,2 @@
+tkinterdnd2==0.4.3
+unitypy==1.23.0
