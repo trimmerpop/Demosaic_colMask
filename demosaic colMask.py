@@ -338,6 +338,7 @@ class DemosaicGUI:
             self.all_shaders = found_shaders
             self.master.after(0, self.update_available_list)
             self.master.after(0, self.auto_select_mosaic_shaders)
+            self.master.after(0, self.reset_and_reapply_suggestions) # Scan 완료 후, 모든 셰이더가 로드된 상태에서 제안을 찾습니다.
             self.master.after(0, self.progress_bar.config, {'value': 0}) # 완료 후 초기화
             self.master.after(0, self.progress_bar.grid_remove) # 스캔 완료 시 프로그레스 바 숨김
             self.master.after(0, self.toggle_buttons, True)
