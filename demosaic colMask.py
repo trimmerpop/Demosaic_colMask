@@ -9,7 +9,7 @@ from queue import Queue, Empty
 from tkinter import ttk, filedialog, messagebox
 
 # Mosaic 인식 키워드
-KEYWORDS = ["mos", "moz", "maz", "pixel", "censor", "ピクセル", "モザイク"]
+KEYWORDS = ["mos", "moz", "masi", "maz", "pixel", "censor", "ピクセル", "モザイク"]
 
 class DemosaicGUI:
     def __init__(self, master):
@@ -72,11 +72,17 @@ class DemosaicGUI:
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *args: self.update_available_list())
         filter_entry = ttk.Entry(available_frame, textvariable=self.filter_var)
-        filter_entry.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        filter_entry.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
 
         self.available_tree = self.create_shader_treeview(available_frame)
         self.available_tree.grid(row=1, column=0, sticky="nsew")
         self.available_tree.bind("<Double-1>", self.move_to_selected)
+
+        available_v_scrollbar = ttk.Scrollbar(available_frame, orient="vertical", command=self.available_tree.yview)
+        available_v_scrollbar.grid(row=1, column=1, sticky="ns")
+        available_h_scrollbar = ttk.Scrollbar(available_frame, orient="horizontal", command=self.available_tree.xview)
+        available_h_scrollbar.grid(row=2, column=0, sticky="ew")
+        self.available_tree.configure(yscrollcommand=available_v_scrollbar.set, xscrollcommand=available_h_scrollbar.set)
 
         # 선택된 셰이더 목록
         selected_frame = ttk.LabelFrame(main_frame, text="Selected Shaders", padding="5")
@@ -87,6 +93,12 @@ class DemosaicGUI:
         self.selected_tree = self.create_shader_treeview(selected_frame)
         self.selected_tree.grid(row=0, column=0, sticky="nsew")
         self.selected_tree.bind("<Double-1>", self.move_to_available)
+
+        selected_v_scrollbar = ttk.Scrollbar(selected_frame, orient="vertical", command=self.selected_tree.yview)
+        selected_v_scrollbar.grid(row=0, column=1, sticky="ns")
+        selected_h_scrollbar = ttk.Scrollbar(selected_frame, orient="horizontal", command=self.selected_tree.xview)
+        selected_h_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.selected_tree.configure(yscrollcommand=selected_v_scrollbar.set, xscrollcommand=selected_h_scrollbar.set)
 
         # 하단 프레임 (로그)
         log_frame = ttk.LabelFrame(master, text="Log", padding="10")
@@ -115,6 +127,10 @@ class DemosaicGUI:
         self.all_shaders = [] # (shader_name, path_id, file_path)
 
     def process_log_queue(self):
+        """
+        GUI 스레드에서 안전하게 로그 메시지를 처리하고 표시합니다.
+        다른 스레드에서 생성된 로그를 주기적으로 확인하여 Text 위젯에 추가합니다.
+        """
         try:
             message = self.log_queue.get_nowait()
             self.log_text.config(state='normal')
@@ -171,18 +187,56 @@ class DemosaicGUI:
         tree.heading("path_id", text="PathID", command=lambda: self.sort_treeview(tree, "path_id", False))
         tree.heading("file", text="File Path", command=lambda: self.sort_treeview(tree, "file", False))
 
-        tree.column("name", width=200)
-        tree.column("path_id", width=80, anchor="e")
-        tree.column("file", width=250)
+        tree.column("name", width=200, stretch=tk.NO)
+        tree.column("path_id", width=80, anchor="e", stretch=tk.NO)
+        tree.column("file", width=250, stretch=tk.NO)
+
+        def on_tree_b1_motion(event, column, start_x, start_width):
+            dx = event.x - start_x
+            new_width = start_width + dx
+            if new_width > 20: # 최소 너비 제한
+                tree.column(column, width=new_width)
+            return "break" # 기본 리사이즈 동작 방지
+
+        def on_tree_b1_press(event, widget):
+            region = widget.identify("region", event.x, event.y)
+            if region == "separator":
+                col_id_str = widget.identify_column(event.x)
+                col_index = int(col_id_str.replace('#', '')) - 1
+                display_cols = widget.cget("displaycolumns")
+                if 0 <= col_index < len(display_cols):
+                    column_id = display_cols[col_index]
+                    start_width = widget.column(column_id, "width")
+                    widget.bind('<B1-Motion>', lambda e, c=column_id, sx=event.x, sw=start_width: on_tree_b1_motion(e, c, sx, sw))
+                return "break" # 기본 리사이즈 동작 방지
+
+        tree.bind('<ButtonPress-1>', lambda e, t=tree: on_tree_b1_press(e, t))
+        tree.bind('<ButtonRelease-1>', lambda e: tree.unbind('<B1-Motion>'))
+
         return tree
 
     def sort_treeview(self, tree, col, reverse):
+        # 정렬 전에 모든 헤더에서 정렬 표시 제거
+        if not hasattr(tree, '_heading_texts'):
+            tree._heading_texts = {c: tree.heading(c, 'text') for c in tree['columns'] if c != 'fullpath'}
+
+        for c in tree._heading_texts:
+            tree.heading(c, text=tree._heading_texts[c])
+
+        # 현재 정렬 상태를 위젯에 저장
+        tree.sort_info = {'col': col, 'reverse': reverse}
+
         data = [(tree.set(item, col), item) for item in tree.get_children('')]
         # PathID는 숫자 기준으로 정렬
         key = int if col == "path_id" else str.lower
-        data.sort(key=lambda t: key(t[0]), reverse=reverse)
+        # reverse=True는 내림차순, False는 오름차순
+        data.sort(key=lambda t: key(str(t[0])), reverse=reverse)
         for index, (val, item) in enumerate(data):
             tree.move(item, '', index)
+        
+        # 현재 정렬된 컬럼에만 표시 추가 (▲: 오름차순, ▼: 내림차순)
+        new_heading_text = f"{tree._heading_texts[col]} {'▼' if reverse else '▲'}"
+        tree.heading(col, text=new_heading_text)
         tree.heading(col, command=lambda: self.sort_treeview(tree, col, not reverse))
 
     def select_folder(self, event=None):
@@ -294,6 +348,11 @@ class DemosaicGUI:
             # 필터는 셰이더 이름과 파일 경로 모두에 적용
             if filter_text in shader_name.lower() or filter_text in file_path.lower():
                 self.available_tree.insert("", tk.END, values=(shader_name, path_id, os.path.basename(file_path), file_path))
+        
+        # 필터링 후, 기존 정렬 상태가 있다면 다시 적용
+        if hasattr(self.available_tree, 'sort_info'):
+            sort_info = self.available_tree.sort_info
+            self.sort_treeview(self.available_tree, sort_info['col'], sort_info['reverse'])
 
     def move_item(self, src_tree, dest_tree):
         selected_items = src_tree.selection()
@@ -302,8 +361,15 @@ class DemosaicGUI:
         
         for item_id in selected_items:
             item_values = src_tree.item(item_id)['values']
-            dest_tree.insert("", tk.END, values=item_values)
             src_tree.delete(item_id)
+            # 항목을 일단 맨 끝에 추가합니다.
+            dest_tree.insert("", tk.END, values=item_values)
+        
+        # 항목 추가가 모두 끝난 후, 대상 트리의 정렬 상태에 따라 다시 정렬합니다.
+        if hasattr(dest_tree, 'sort_info'):
+            sort_info = dest_tree.sort_info
+            # 현재 저장된 정렬 상태(컬럼, 방향)를 그대로 사용하여 다시 정렬합니다.
+            self.sort_treeview(dest_tree, sort_info['col'], sort_info['reverse'])
         
         if src_tree == self.selected_tree:
             self.update_available_list()
