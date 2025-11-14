@@ -5,6 +5,7 @@ It's made with [UnityPy](https://github.com/K0lb3/UnityPy).
 ### Features
   - Find assets files which has mosaic shaders
   - Set colMask to 0
+  - Replace shader with another shader. (ex. Live2D Cubism/UnlitMosaic -> Live2D Cubism/Unlit)
 
 ### Watch out
   - Graphics may become corrupted as the colMask value changes.
