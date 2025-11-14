@@ -164,8 +164,6 @@ class DemosaicGUI:
         self.available_context_menu = tk.Menu(master, tearoff=0)
         self.available_context_menu.add_command(label="Copy Info", command=lambda: self.copy_shader_info(self.available_tree))
 
-        # 드래그 앤 드롭 관련
-        self.drag_data = {"item": None, "source_tree": None}
     def process_log_queue(self):
         """
         GUI 스레드에서 안전하게 로그 메시지를 처리하고 표시합니다.
@@ -216,60 +214,6 @@ class DemosaicGUI:
             self.path_var.set(path)
         else:
             messagebox.showwarning("Warning", "Please drop a folder, not a file.")
-
-    def on_drag_press(self, event):
-        """Treeview에서 드래그 시작 시 호출됩니다."""
-        tree = event.widget
-        item_id = tree.identify_row(event.y)
-        if item_id:
-            self.drag_data["item"] = item_id
-            self.drag_data["source_tree"] = tree
-
-    def on_drop_release(self, event):
-        """애플리케이션 전체에서 드롭(마우스 버튼 떼기) 시 호출됩니다."""
-        if not self.drag_data["item"]:
-            return
-
-        source_tree = self.drag_data["source_tree"]
-        source_item_id = self.drag_data["item"]
-
-        # 드롭된 위치의 위젯을 찾습니다.
-        dest_widget = event.widget.winfo_containing(event.x_root, event.y_root)
-
-        # 드래그 데이터 초기화
-        self.drag_data["item"] = None
-        self.drag_data["source_tree"] = None
-
-        # 드롭 대상이 Treeview가 아니면 무시
-        if not isinstance(dest_widget, ttk.Treeview):
-            return
-
-        # 드롭 대상이 자기 자신이면 무시
-        if dest_widget == source_tree:
-            return
-
-        # 드롭 위치의 상대 좌표를 계산하여 아이템을 식별합니다.
-        y = event.y_root - dest_widget.winfo_rooty()
-        target_item_id = dest_widget.identify_row(y)
-
-        # 시나리오 1: available -> selected (교체 또는 이동)
-        if source_tree == self.available_tree and dest_widget == self.selected_tree:
-            if target_item_id: # 아이템 위에 드롭 -> 교체
-                source_values = source_tree.item(source_item_id, 'values')
-                self.replacement_map[target_item_id] = source_values
-                self.selected_tree.item(target_item_id, tags=('replaced',))
-                self.selected_tree.set(target_item_id, 'status', f"-> {source_values[0]}")
-                self.reset_and_reapply_suggestions()
-                print(f"'{self.selected_tree.item(target_item_id, 'values')[0]}' will be replaced by '{source_values[0]}'.")
-            else: # 빈 공간에 드롭 -> 이동
-                source_tree.selection_set(source_item_id)
-                self.move_to_selected()
-
-        # 시나리오 2: selected -> available (이동만)
-        elif source_tree == self.selected_tree and dest_widget == self.available_tree:
-            # selected에서 available로는 항상 이동으로 처리합니다.
-            source_tree.selection_set(source_item_id)
-            self.move_to_available()
 
 
     def create_shader_treeview(self, parent):
