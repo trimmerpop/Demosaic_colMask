@@ -3,6 +3,9 @@ import shutil
 import sys
 import UnityPy
 import tkinter as tk
+import zipfile
+import tempfile
+import subprocess
 import threading
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from queue import Queue, Empty
@@ -11,10 +14,22 @@ from tkinter import ttk, filedialog, messagebox
 
 # Mosaic 인식 키워드
 KEYWORDS = ["mos", "moz", "masi", "maz", "pixel", "censor", "ピクセル", "モザイク"]
+# 스캔 대상 에셋 파일 확장자
+ASSET_EXTENSIONS = (".assets", ".bundle", ".unity3d", ".sharedAssets", ".resS", ".dat")
 
 class DemosaicGUI:
     def __init__(self, master):
         self.master = master
+
+        # 데이터 변수들을 UI 위젯 생성보다 먼저 초기화합니다.
+        self.all_shaders = [] # (shader_name, path_id, file_path) 튜플 리스트
+        self.replacement_map = {} # {target_item_id: source_values}
+        self.apk_session_temp_dir = None # APK 모드에서 사용할 최상위 임시 디렉토리
+        self.apk_map = {} # {original_apk_path: temp_dir_for_apk}
+        self.path_var = tk.StringVar()
+        self.filter_var = tk.StringVar()
+        self.backup_var = tk.BooleanVar(value=True)
+
         master.title("Demosaic Tool (colMask)")
         master.geometry("800x600")
 
@@ -23,11 +38,9 @@ class DemosaicGUI:
         top_frame.pack(fill=tk.X)
 
         ttk.Label(top_frame, text="Path:").pack(side=tk.LEFT, padx=(0, 5))
-        self.path_var = tk.StringVar()
         self.path_entry = ttk.Entry(top_frame, textvariable=self.path_var)
         self.path_var.trace_add("write", self.on_path_change)
-
-        self.placeholder = "Drag & Drop or Double click to select a folder"
+        self.placeholder = "Drag & Drop or Double click to select a folder or file"
         self.placeholder_color = 'grey'
         self.default_fg_color = self.path_entry.cget('foreground')
 
@@ -35,10 +48,10 @@ class DemosaicGUI:
         self.path_entry.bind("<FocusOut>", self.on_entry_focus_out)
 
         self.path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.path_entry.bind("<Double-1>", self.select_folder)
+        self.path_entry.bind("<Double-1>", self.select_path)
         # 드래그 앤 드롭 설정
-        self.path_entry.drop_target_register(DND_FILES)
-        self.path_entry.dnd_bind('<<Drop>>', self.on_drop)
+        self.master.drop_target_register(DND_FILES)
+        self.master.dnd_bind('<<Drop>>', self.on_drop)
 
         self.scan_all_button = ttk.Button(top_frame, text="Scan All", command=self.scan_all_for_gui)
         self.scan_all_button.pack(side=tk.LEFT, padx=(5, 0))
@@ -46,9 +59,8 @@ class DemosaicGUI:
         #self.scan_button = ttk.Button(top_frame, text="Scan Shaders", command=self.scan_shaders_for_gui, state="disabled")
         #self.scan_button.pack(side=tk.LEFT, padx=(5, 0))
 
-        self.backup_var = tk.BooleanVar(value=True)
-        backup_check = ttk.Checkbutton(top_frame, text="Backup File", variable=self.backup_var)
-        backup_check.pack(side=tk.LEFT, padx=(5, 0))
+        self.backup_check = ttk.Checkbutton(top_frame, text="Backup File", variable=self.backup_var)
+        self.backup_check.pack(side=tk.LEFT, padx=(5, 0))
 
         self.start_button = ttk.Button(top_frame, text="Start Demosaic", command=self.start_processing)
         self.start_button.pack(side=tk.LEFT, padx=(5, 0))
@@ -71,10 +83,13 @@ class DemosaicGUI:
         available_frame.grid_columnconfigure(0, weight=1)
         paned_window.add(available_frame, weight=1)
 
-        self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *args: self.update_available_list())
-        filter_entry = ttk.Entry(available_frame, textvariable=self.filter_var)
-        filter_entry.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        self.filter_entry = ttk.Entry(available_frame, textvariable=self.filter_var)
+        self.filter_entry.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+
+        self.filter_placeholder = "filter"
+        self.filter_entry.bind("<FocusIn>", self.on_filter_entry_focus_in)
+        self.filter_entry.bind("<FocusOut>", self.on_filter_entry_focus_out)
 
         self.available_tree = self.create_shader_treeview(available_frame)
         self.available_tree.grid(row=1, column=0, sticky="nsew")
@@ -104,6 +119,9 @@ class DemosaicGUI:
 
         self.selected_tree.column("name", stretch=tk.NO) # name 컬럼이 독립적으로 너비를 갖도록 설정
         self.selected_tree.column("status", width=150, stretch=tk.NO)
+        # 모든 컬럼의 stretch 속성을 NO로 설정하여 자동 크기 조절 방지
+        self.selected_tree.column("path_id", stretch=tk.NO)
+        self.selected_tree.column("file", stretch=tk.NO)
 
         self.selected_tree.grid(row=0, column=0, sticky="nsew")
         self.selected_tree.bind("<Double-1>", self.move_to_available)
@@ -114,15 +132,6 @@ class DemosaicGUI:
         selected_h_scrollbar = ttk.Scrollbar(selected_frame, orient="horizontal", command=self.selected_tree.xview)
         selected_h_scrollbar.grid(row=1, column=0, sticky="ew")
         self.selected_tree.configure(yscrollcommand=selected_v_scrollbar.set, xscrollcommand=selected_h_scrollbar.set)
-
-        # 범례 프레임 (TreeView 아래)
-        legend_frame = ttk.Frame(main_frame)
-        legend_frame.pack(fill=tk.X, pady=(5,0))
-        ttk.Label(legend_frame, text="■", foreground='#FFDDC1').pack(side=tk.LEFT)
-        ttk.Label(legend_frame, text="Suggestion Replace Target").pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(legend_frame, text="■", foreground='pale green').pack(side=tk.LEFT)
-        ttk.Label(legend_frame, text="Suggestion Source / Replaced").pack(side=tk.LEFT, padx=(0, 20))
-        ttk.Label(legend_frame, text="Right-click on a selected item to replace.").pack(side=tk.LEFT)
 
         # 하단 프레임 (로그)
         log_frame = ttk.LabelFrame(master, text="Log", padding="10")
@@ -147,9 +156,7 @@ class DemosaicGUI:
         self.master.after(100, self.process_log_queue)
 
         self.on_entry_focus_out(None) # 초기 플레이스홀더 설정
-
-        self.all_shaders = [] # (shader_name, path_id, file_path) 튜플 리스트
-        self.replacement_map = {} # {target_item_id: source_values}
+        self.on_filter_entry_focus_out(None) # 필터 플레이스홀더 초기 설정
 
         # 태그 설정
         self.available_tree.tag_configure('suggest_source', background='pale green')
@@ -163,6 +170,9 @@ class DemosaicGUI:
 
         self.available_context_menu = tk.Menu(master, tearoff=0)
         self.available_context_menu.add_command(label="Copy Info", command=lambda: self.copy_shader_info(self.available_tree))
+
+        # 프로그램 종료 시 임시 폴더 정리
+        self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def process_log_queue(self):
         """
@@ -190,6 +200,18 @@ class DemosaicGUI:
         def flush(self):
             pass
 
+    def on_closing(self):
+        """
+        프로그램 종료 시 임시 폴더를 정리합니다.
+        """
+        if self.apk_session_temp_dir and os.path.exists(self.apk_session_temp_dir):
+            try:
+                shutil.rmtree(self.apk_session_temp_dir)
+                print(f"Cleaned up session temporary directory on exit: {self.apk_session_temp_dir}")
+            except Exception as e:
+                print(f"Error cleaning up temporary directory on exit: {e}")
+        self.master.destroy()
+
     def on_entry_focus_in(self, event):
         if self.path_var.get() == self.placeholder:
             self.path_entry.delete(0, "end")
@@ -200,21 +222,49 @@ class DemosaicGUI:
             self.path_entry.insert(0, self.placeholder)
             self.path_entry.config(foreground=self.placeholder_color)
 
+    def on_filter_entry_focus_in(self, event):
+        if self.filter_var.get() == self.filter_placeholder:
+            self.filter_entry.delete(0, "end")
+            self.filter_entry.config(foreground=self.default_fg_color)
+
+    def on_filter_entry_focus_out(self, event):
+        if not self.filter_var.get():
+            self.filter_entry.insert(0, self.filter_placeholder)
+            self.filter_entry.config(foreground=self.placeholder_color)
+
     def on_drop(self, event):
-        # event.data는 중괄호로 묶인 경로 문자열일 수 있음 (예: '{D:/path/to/folder}')
-        path = event.data.strip('{}')
-
-        # 여러 파일이 드롭된 경우, 첫 번째 항목을 사용
-        if ' ' in path and not os.path.isdir(path):
-            path = path.split(' ')[0]
-
-        # 드롭된 것이 폴더인지 확인
+        # event.data는 공백으로 구분된 경로 목록일 수 있으며, 각 경로는 중괄호로 묶일 수 있습니다.
+        # 예: '{C:/path with space/file1.txt}' '{C:/path with space/file2.txt}' 또는 'C:/path/file.txt'
+        # 첫 번째 경로만 사용합니다.
+        path = event.data.strip()
+        if path.startswith('{') and '}' in path:
+            path = path[1:path.find('}')]
+        
+        is_valid = False
         if os.path.isdir(path):
-            self.path_entry.config(foreground=self.default_fg_color)
-            self.path_var.set(path)
-        else:
-            messagebox.showwarning("Warning", "Please drop a folder, not a file.")
+            is_valid = True
+        elif os.path.isfile(path):
+            try:
+                if path.lower().endswith('.apk'):
+                    with zipfile.ZipFile(path, 'r') as zf:
+                        # 파일 목록을 한번 읽어보는 것으로 유효한 zip 파일인지 간단히 확인
+                        zf.infolist()
+                    is_valid = True
+                else:
+                    # UnityPy로 열어서 유효한 에셋 파일인지 확인
+                    UnityPy.load(path)
+                    is_valid = True
+            except zipfile.BadZipFile:
+                messagebox.showwarning("Invalid File", f"The dropped file is not a valid APK file:\n{os.path.basename(path)}")
+            except Exception as e:
+                messagebox.showwarning("Unsupported File", f"The dropped file is not a supported Unity asset file or is corrupted:\n{os.path.basename(path)}\n\nError: {e}")
 
+        if not is_valid:
+            return
+
+        self.path_entry.config(foreground=self.default_fg_color)
+        self.path_var.set(path)
+        self.master.after(10, lambda: (self.path_entry.selection_range(0, tk.END), self.path_entry.icursor(tk.END)))
 
     def create_shader_treeview(self, parent):
         # 'fullpath' 열을 추가하되, displaycolumns를 통해 숨김
@@ -260,20 +310,26 @@ class DemosaicGUI:
         tree.heading(col, text=new_heading_text)
         tree.heading(col, command=lambda: self.sort_treeview(tree, col, not reverse))
 
-    def select_folder(self, event=None):
-        folder_selected = filedialog.askdirectory(initialdir=self.path_var.get())
-        if folder_selected:
+    def select_path(self, event=None):
+        initial_dir = os.path.dirname(self.path_var.get()) if self.path_var.get() and os.path.exists(os.path.dirname(self.path_var.get())) else "/"
+        # askopenfilename은 폴더 선택을 지원하지 않으므로 askdirectory로 변경합니다.
+        path = filedialog.askdirectory(
+            initialdir=initial_dir,
+            title="Select a folder"
+        )
+        
+        if path:
             self.path_entry.config(foreground=self.default_fg_color)
-            self.path_var.set(folder_selected)
+            self.path_var.set(path)
+            # after를 사용하여 UI 업데이트 후 선택이 적용되도록 함
+            self.master.after(10, lambda: (self.path_entry.selection_range(0, tk.END), self.path_entry.icursor(tk.END)))
 
     def on_path_change(self, *args):
         if self.path_var.get() == self.placeholder:
-            #self.scan_button.config(state="disabled")
             return
         
         path = self.path_var.get()
-        if path and os.path.isdir(path):
-            #self.scan_button.config(state="normal")
+        if path and os.path.exists(path):
             self.scan_shaders_for_gui(scan_all=False) # 폴더 선택 시 자동 스캔 (기본 확장자만)
         #else:
         #    self.clear_all()
@@ -287,34 +343,98 @@ class DemosaicGUI:
         self.scan_shaders_for_gui(scan_all=True)
 
     def scan_shaders_for_gui(self, scan_all=False):
-        def _scan_task(target_path, scan_all_files):
+        def _scan_task(scan_paths):
+            # 이전 세션의 임시 파일 정리 (스캔 시작 시)
+            if self.apk_session_temp_dir and os.path.exists(self.apk_session_temp_dir):
+                # Windows에서 파일 핸들 잠금 문제로 rmtree가 실패하는 경우를 대비하여 onerror 핸들러 추가
+                def remove_readonly(func, path, excinfo):
+                    # 오류가 발생해도 무시하고 계속 진행
+                    pass
+                shutil.rmtree(self.apk_session_temp_dir, onerror=remove_readonly)
+
+            self.apk_session_temp_dir = None
+            self.apk_map = {}
+            is_apk_mode = False
+
             self.all_shaders = []
             self.master.after(0, self.clear_treeview, self.available_tree)
             self.master.after(0, self.replacement_map.clear)
             self.master.after(0, self.clear_treeview, self.selected_tree)
             
             self.master.after(0, self.toggle_buttons, False)
-            self.master.after(0, self.progress_bar.grid) # 스캔 시작 시 프로그레스 바 표시
+            self.master.after(0, self.progress_bar.grid)
 
-            print(f"Scanning for shaders in: {target_path}")
-
-            # 1. 스캔할 파일 목록 및 총 개수 계산
-            files_to_scan = []
-            for root, _, files in os.walk(target_path):
-                for file in files:
-                    if (scan_all_files and not file.endswith(".bak")) or file.endswith((".assets", ".bundle", ".unity3d", ".sharedAssets", ".resS", ".dat")):
-                        files_to_scan.append(os.path.join(root, file))
+            # 2. 모드 결정 및 APK 처리
+            target_path = self.path_var.get()
             
-            total_files = len(files_to_scan)
+            asset_files = []
+            apk_files = []
+            if os.path.isdir(target_path):
+                all_files_in_dir = [os.path.join(r, f) for r, _, fs in os.walk(target_path) for f in fs]
+                asset_files = [f for f in all_files_in_dir if f.lower().endswith(ASSET_EXTENSIONS)]
+                apk_files = [f for f in all_files_in_dir if f.lower().endswith(".apk")]
+            elif os.path.isfile(target_path):
+                if target_path.lower().endswith(ASSET_EXTENSIONS):
+                    asset_files.append(target_path)
+                elif target_path.lower().endswith(".apk"):
+                    apk_files.append(target_path)
+
+            scan_targets = []
+            # 일반 에셋 파일이 없고, APK 파일만 있을 때 APK 모드로 진입
+            if not asset_files and apk_files:
+                # 여러 APK가 발견되어도 첫 번째 파일만 처리
+                apk_to_process = apk_files[0]
+                if len(apk_files) > 1:
+                    print(f"Multiple APKs found. Processing the first one: {apk_to_process}")
+
+                # self.master.after(0, self.path_var.set, apk_to_process) # 이 줄이 무한 루프를 유발하므로 주석 처리 또는 삭제합니다.
+                self.master.after(0, self.backup_var.set, False)
+                is_apk_mode = True
+                print("APK mode detected. Only .apk files found.")
+                
+                java_ok = shutil.which("java") is not None
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                jar_path = os.path.join(script_dir, "uber-apk-signer.jar")
+                jar_ok = os.path.exists(jar_path)
+                if not java_ok or not jar_ok:
+                    error_msg = "APK Repacking Environment Check Failed:\n\n"
+                    if not java_ok: error_msg += "• Java is not installed or not in your system's PATH.\n"
+                    if not jar_ok: error_msg += f"• uber-apk-signer.jar not found in the script directory:\n  {script_dir}\n"
+                    error_msg += "\nAPK repacking will not be possible."
+                    self.master.after(0, messagebox.showwarning, "Environment Warning", error_msg)
+
+                self.apk_session_temp_dir = tempfile.mkdtemp(prefix="demosaic_session_")
+                try:
+                    apk_name = os.path.splitext(os.path.basename(apk_to_process))[0]
+                    temp_sub_dir = os.path.join(self.apk_session_temp_dir, apk_name)
+                    os.makedirs(temp_sub_dir, exist_ok=True)
+                    print(f"Extracting {os.path.basename(apk_to_process)} to {temp_sub_dir}...")
+                    with zipfile.ZipFile(apk_to_process, 'r') as zip_ref:
+                        zip_ref.extractall(temp_sub_dir)
+                    self.apk_map[apk_to_process] = temp_sub_dir
+                    for root, _, files in os.walk(temp_sub_dir):
+                        for file in files:
+                            if file.lower().endswith(ASSET_EXTENSIONS):
+                                scan_targets.append(os.path.join(root, file))
+                except Exception as e:
+                    print(f"[Error] Failed to extract {os.path.basename(apk_to_process)}: {e}")
+            else:
+                print("Normal mode detected.")
+                self.master.after(0, self.backup_var.set, True)
+                if scan_all:
+                    if os.path.isdir(target_path):
+                        scan_targets = [f for f in all_files_in_dir if not f.endswith(".bak")]
+                    else: # 파일 하나만 Scan All 하는 경우는 해당 파일만 스캔
+                        scan_targets = asset_files
+                else:
+                    scan_targets = asset_files
+
+            # 3. 실제 파일 스캔
+            total_files = len(scan_targets)
             self.master.after(0, self.progress_bar.config, {'maximum': total_files, 'value': 0})
-
-            def update_progress(value):
-                self.progress_bar.config(value=value)
-                self.progress_bar.update()
-
-            # 2. 실제 스캔 및 프로그레스 바 업데이트
+            print(f"Scanning {total_files} files for shaders...")
             found_shaders = []
-            for i, file_path in enumerate(files_to_scan):
+            for i, file_path in enumerate(scan_targets):
                 try:
                     with open(file_path, "rb") as f:
                         env = UnityPy.load(f)
@@ -330,30 +450,29 @@ class DemosaicGUI:
                                 
                                 found_shaders.append((shader_name, obj.path_id, file_path))
                 except Exception as e:
-                    print(f"Error processing {file_path}: {e}")
+                    pass
                 
-                # 프로그레스 바 업데이트
-                self.master.after(0, update_progress, i + 1)
+                self.master.after(0, self.progress_bar.config, {'value': i + 1})
+                self.master.after(0, self.progress_bar.update)
             
             self.all_shaders = found_shaders
             self.master.after(0, self.update_available_list)
             self.master.after(0, self.auto_select_mosaic_shaders)
-            self.master.after(0, self.reset_and_reapply_suggestions) # Scan 완료 후, 모든 셰이더가 로드된 상태에서 제안을 찾습니다.
-            self.master.after(0, self.progress_bar.config, {'value': 0}) # 완료 후 초기화
-            self.master.after(0, self.progress_bar.grid_remove) # 스캔 완료 시 프로그레스 바 숨김
+            self.master.after(0, self.reset_and_reapply_suggestions)
+            self.master.after(0, self.progress_bar.config, {'value': 0})
+            self.master.after(0, self.progress_bar.grid_remove)
             self.master.after(0, self.toggle_buttons, True)
             print("Scan complete.")
 
         target_path = self.path_var.get()
-        if not target_path or target_path == self.placeholder or not os.path.isdir(target_path):
-            # 이 부분은 주로 수동 입력 시 경로가 유효하지 않을 때를 대비합니다.
-            messagebox.showerror("Error", "Invalid or empty path specified.")
+        if not target_path or not os.path.exists(target_path):
+            messagebox.showerror("Error", "Please select a valid folder first.")
             return
 
         self.filter_var.set("") # 필터 초기화
 
         #self.scan_button.config(state="disabled") # 스캔 중 버튼 비활성화
-        threading.Thread(target=_scan_task, args=(target_path, scan_all), daemon=True).start()
+        threading.Thread(target=_scan_task, args=(target_path,), daemon=True).start()
 
     def clear_treeview(self, tree):
         for item in tree.get_children():
@@ -674,9 +793,99 @@ class DemosaicGUI:
                 print("\nStarting demosaic (colMask) process...")
                 for file_path, path_ids in shaders_to_process.items():
                     self.process_asset_file(file_path, set(path_ids))
-            
+
+            # APK 모드에서 수정된 파일들을 원본 APK별로 그룹화
+            modified_files_by_apk = {}
+            if self.apk_map:
+                for original_apk_path, temp_dir in self.apk_map.items():
+                    modified_files_by_apk[original_apk_path] = []
+
+                for modified_file_path in shaders_to_process.keys():
+                    for original_apk_path, temp_dir in self.apk_map.items():
+                        if modified_file_path.startswith(temp_dir):
+                            modified_files_by_apk[original_apk_path].append(modified_file_path)
+                            break
+                
+                # replacement_tasks에 있는 파일들도 추가
+                # (이 부분은 현재 로직에서는 shaders_to_process에 이미 포함되므로 생략 가능하나, 안정성을 위해 추가)
+
+            # APK 모드인 경우, 리패키징 수행
+            if self.apk_map:
+                print("\nStarting APK repacking process...")
+                for original_apk_path, temp_dir in self.apk_map.items():
+                    print(f"Repacking for {os.path.basename(original_apk_path)}...")
+                    base, ext = os.path.splitext(original_apk_path)
+                    output_apk_path = f"{base}_mod{ext}"
+
+                    if not output_apk_path:
+                        print("Repacking cancelled by user.")
+                        continue
+
+                    try:
+                        # 1. 수정된 파일 목록을 {arcname: full_path} 형태의 딕셔너리로 변환
+                        modified_files_map = {
+                            os.path.relpath(f, temp_dir): f
+                            for f in modified_files_by_apk.get(original_apk_path, [])
+                        }
+
+                        # 2. 새로운 임시 APK를 만들면서 수정된 파일만 교체
+                        unsigned_apk_path = os.path.join(self.apk_session_temp_dir, f"temp_{os.path.basename(original_apk_path)}")
+                        print(f"Rebuilding APK with {len(modified_files_map)} modified files...")
+                        
+                        with zipfile.ZipFile(original_apk_path, 'r') as zin:
+                            with zipfile.ZipFile(unsigned_apk_path, 'w') as zout:
+                                for item in zin.infolist():
+                                    # 수정된 파일 목록에 현재 파일이 있다면, 수정된 파일의 내용으로 교체
+                                    if item.filename in modified_files_map:
+                                        modified_file_path = modified_files_map[item.filename]
+                                        # .so 파일은 압축하지 않음
+                                        compress_type = zipfile.ZIP_STORED if item.filename.lower().endswith('.so') else zipfile.ZIP_DEFLATED
+                                        zout.write(modified_file_path, item.filename, compress_type=compress_type)
+                                        print(f"  -> Updated: {item.filename}")
+                                    else:
+                                        # 수정되지 않은 파일은 원본 그대로 복사
+                                        buffer = zin.read(item.filename)
+                                        zout.writestr(item, buffer)
+                        print(f"Rebuilt unsigned APK: {unsigned_apk_path}")
+
+                        # 2. Sign the APK
+                        print("Signing APK with debug key...")
+                        script_dir = os.path.dirname(os.path.abspath(__file__))
+                        jar_path = os.path.join(script_dir, "uber-apk-signer.jar")
+                        if not os.path.exists(jar_path):
+                            raise Exception(f"uber-apk-signer.jar not found in the script directory:\n{script_dir}")
+
+                        apk_dir = os.path.dirname(unsigned_apk_path)
+                        result = subprocess.run(
+                            # cwd를 apk_dir로 설정하고, unsigned.apk의 전체 경로를 전달
+                            # zipalign을 다시 활성화하기 위해 --skip-zip-align 제거
+                            ["java", "-Dfile.encoding=UTF-8", "-jar", jar_path, "-a", unsigned_apk_path, "--out", apk_dir],
+                            capture_output=True, text=True, check=False, encoding='utf-8', errors='ignore', cwd=apk_dir
+                        )
+
+                        if result.returncode != 0:
+                            error_message = result.stderr or result.stdout
+                            raise Exception(f"uber-apk-signer failed with exit code {result.returncode}:\n---\n{error_message.strip()}\n---")
+
+                        # uber-apk-signer는 입력 파일명을 기준으로 결과물을 생성
+                        base_name = os.path.splitext(os.path.basename(unsigned_apk_path))[0]
+                        
+                        signed_apk_aligned = os.path.join(apk_dir, f"{base_name}-aligned-debugSigned.apk")
+
+                        # uber-apk-signer가 생성한 서명된 파일을 최종 목적지로 이동합니다.
+                        shutil.move(signed_apk_aligned, output_apk_path)
+                        print(f"[✔] Signed APK saved to: {output_apk_path}")
+
+                        # 서명에 사용된 임시 unsigned.apk 파일은 삭제합니다.
+                        os.remove(unsigned_apk_path) # 서명에 사용된 원본은 삭제
+
+                    except Exception as e:
+                        messagebox.showerror("APK Repack Error", f"Failed to repack or sign APK for {os.path.basename(original_apk_path)}: {e}")
+                        print(f"[✘] Failed to repack or sign APK: {e}")
+
             self.master.after(0, self.toggle_buttons, True)
             messagebox.showinfo("Complete", "Processing finished. Check the console for details.")
+
             print("Complete.")
         
         threading.Thread(target=_processing_task, daemon=True).start()
@@ -784,6 +993,6 @@ class DemosaicGUI:
 
 
 if __name__ == "__main__":
-    root = TkinterDnD.Tk() # tk.Tk() 대신 TkinterDnD.Tk() 사용
+    root = TkinterDnD.Tk()
     app = DemosaicGUI(root)
     root.mainloop()
