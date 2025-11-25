@@ -6,7 +6,8 @@ This tool can operate in two modes:
 1.  **Normal Mode**: Directly modifies asset files (e.g., `.assets`, `.bundle`) within a folder.
 2.  **APK Mode**: Extracts an `.apk` file, modifies the assets inside, and then repacks it into a new, installable `.apk` file.
 
-  <!-- 스크린샷 이미지 링크로 교체하세요 -->
+<img width="1604" height="1264" alt="image" src="https://github.com/user-attachments/assets/69d803a7-abbd-4e3b-95e6-f57b8f0613eb" />
+
 
 ## Features
 
