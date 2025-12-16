@@ -10,6 +10,7 @@ import threading
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from queue import Queue, Empty
 import re
+from packaging import version
 from tkinter import ttk, filedialog, messagebox
 
 # Mosaic 인식 키워드
@@ -212,6 +213,36 @@ class DemosaicGUI:
                 print(f"Error cleaning up temporary directory on exit: {e}")
         self.master.destroy()
 
+    def _find_uber_apk_signer_jar(self):
+        """
+        스크립트 디렉토리에서 uber-apk-signer jar 파일을 찾습니다.
+        1. 'uber-apk-signer.jar'가 있으면 우선적으로 반환합니다.
+        2. 없다면 'uber-apk-signer-*.jar' 패턴의 파일 중 가장 버전이 높은 파일을 찾습니다.
+        3. 적절한 파일을 찾지 못하면 None을 반환합니다.
+        """
+        if getattr(sys, 'frozen', False):
+            script_dir = os.path.dirname(sys.executable)
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # 1. 'uber-apk-signer.jar' 우선 확인
+        default_jar_path = os.path.join(script_dir, "uber-apk-signer.jar")
+        if os.path.exists(default_jar_path):
+            return default_jar_path
+
+        # 2. 버전이 포함된 jar 파일 검색
+        signer_jars = []
+        for filename in os.listdir(script_dir):
+            if filename.startswith("uber-apk-signer-") and filename.endswith(".jar"):
+                signer_jars.append(filename)
+
+        if not signer_jars:
+            return None
+
+        # 가장 최신 버전의 jar 파일 찾기
+        latest_jar = max(signer_jars, key=lambda f: version.parse(re.search(r'uber-apk-signer-(.*?)\.jar', f).group(1)))
+        return os.path.join(script_dir, latest_jar)
+
     def on_entry_focus_in(self, event):
         if self.path_var.get() == self.placeholder:
             self.path_entry.delete(0, "end")
@@ -393,22 +424,14 @@ class DemosaicGUI:
                 print("APK mode detected. Only .apk files found.")
                 
                 java_ok = shutil.which("java") is not None
+                jar_path = self._find_uber_apk_signer_jar()
 
-                # 패키징된 실행 파일(.exe) 환경과 일반 스크립트 환경 모두에서 리소스 경로를 올바르게 찾습니다.
-                if getattr(sys, 'frozen', False):
-                    # PyInstaller로 패키징된 경우, .exe 파일이 위치한 디렉토리를 사용합니다.
-                    script_dir = os.path.dirname(sys.executable)
-                else:
-                    # 일반 스크립트로 실행된 경우, 파일의 디렉토리를 사용합니다.
-                    script_dir = os.path.dirname(os.path.abspath(__file__))
-                jar_path = os.path.join(script_dir, "uber-apk-signer.jar")
-
-                jar_ok = os.path.exists(jar_path)
-
-                if not java_ok or not jar_ok:
+                if not java_ok or not jar_path:
                     error_msg = "APK Repacking Environment Check Failed:\n\n"
                     if not java_ok: error_msg += "• Java is not installed or not in your system's PATH.\n"
-                    if not jar_ok: error_msg += f"• uber-apk-signer.jar not found in the script directory:\n  {script_dir}\n"
+                    if not jar_path:
+                        script_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+                        error_msg += f"• uber-apk-signer.jar not found in the script directory:\n  {script_dir}\n"
                     error_msg += "\nAPK repacking will not be possible."
                     self.master.after(0, messagebox.showwarning, "Environment Warning", error_msg)
 
@@ -859,16 +882,9 @@ class DemosaicGUI:
 
                         # 2. Sign the APK
                         print("Signing APK with debug key...")
-                        # 패키징된 실행 파일(.exe) 환경과 일반 스크립트 환경 모두에서 리소스 경로를 올바르게 찾습니다.
-                        if getattr(sys, 'frozen', False):
-                            # PyInstaller로 패키징된 경우, .exe 파일이 위치한 디렉토리를 사용합니다.
-                            script_dir = os.path.dirname(sys.executable)
-                        else:
-                            # 일반 스크립트로 실행된 경우, 파일의 디렉토리를 사용합니다.
-                            script_dir = os.path.dirname(os.path.abspath(__file__))
-                        jar_path = os.path.join(script_dir, "uber-apk-signer.jar")
-
-                        if not os.path.exists(jar_path):
+                        jar_path = self._find_uber_apk_signer_jar()
+                        if not jar_path:
+                            script_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
                             raise Exception(f"uber-apk-signer.jar not found in the script directory:\n{script_dir}")
 
                         apk_dir = os.path.dirname(unsigned_apk_path)
