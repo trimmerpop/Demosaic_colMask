@@ -393,9 +393,18 @@ class DemosaicGUI:
                 print("APK mode detected. Only .apk files found.")
                 
                 java_ok = shutil.which("java") is not None
-                script_dir = os.path.dirname(os.path.abspath(__file__))
+
+                # 패키징된 실행 파일(.exe) 환경과 일반 스크립트 환경 모두에서 리소스 경로를 올바르게 찾습니다.
+                if getattr(sys, 'frozen', False):
+                    # PyInstaller로 패키징된 경우, .exe 파일이 위치한 디렉토리를 사용합니다.
+                    script_dir = os.path.dirname(sys.executable)
+                else:
+                    # 일반 스크립트로 실행된 경우, 파일의 디렉토리를 사용합니다.
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
                 jar_path = os.path.join(script_dir, "uber-apk-signer.jar")
+
                 jar_ok = os.path.exists(jar_path)
+
                 if not java_ok or not jar_ok:
                     error_msg = "APK Repacking Environment Check Failed:\n\n"
                     if not java_ok: error_msg += "• Java is not installed or not in your system's PATH.\n"
@@ -850,8 +859,15 @@ class DemosaicGUI:
 
                         # 2. Sign the APK
                         print("Signing APK with debug key...")
-                        script_dir = os.path.dirname(os.path.abspath(__file__))
+                        # 패키징된 실행 파일(.exe) 환경과 일반 스크립트 환경 모두에서 리소스 경로를 올바르게 찾습니다.
+                        if getattr(sys, 'frozen', False):
+                            # PyInstaller로 패키징된 경우, .exe 파일이 위치한 디렉토리를 사용합니다.
+                            script_dir = os.path.dirname(sys.executable)
+                        else:
+                            # 일반 스크립트로 실행된 경우, 파일의 디렉토리를 사용합니다.
+                            script_dir = os.path.dirname(os.path.abspath(__file__))
                         jar_path = os.path.join(script_dir, "uber-apk-signer.jar")
+
                         if not os.path.exists(jar_path):
                             raise Exception(f"uber-apk-signer.jar not found in the script directory:\n{script_dir}")
 
