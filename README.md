@@ -31,7 +31,7 @@ This tool can operate in two modes:
 ### 2. Python Libraries
 Install the required libraries using pip:
 ```shell
-pip install UnityPy tkinterdnd2
+pip install UnityPy tkinterdnd2 packaging
 ```
 
 ### 3. For APK Mode
