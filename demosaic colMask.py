@@ -15,6 +15,8 @@ from tkinter import ttk, filedialog, messagebox
 
 # Mosaic 인식 키워드
 KEYWORDS = ["mos", "moz", "masi", "maz", "pixel", "censor", "ピクセル", "モザイク"]
+# white list
+WHITE_LIST = ["Hidden/HDRP/OpaqueAtmosphericScattering", "Hidden/PostProcessing/SubpixelMorphologicalAntialiasing"]  # 예시 화이트리스트
 # 스캔 대상 에셋 파일 확장자
 ASSET_EXTENSIONS = (".assets", ".bundle", ".unity3d", ".sharedAssets", ".resS", ".dat")
 
@@ -569,8 +571,10 @@ class DemosaicGUI:
         items_to_move = []
         for item_id in self.available_tree.get_children():
             shader_name = self.available_tree.item(item_id)['values'][0]
+            # 키워드가 포함되어 있고, 화이트리스트에 없는 경우에만 추가
             if any(keyword in shader_name.lower() for keyword in KEYWORDS):
-                items_to_move.append(item_id)
+                if shader_name not in WHITE_LIST:
+                    items_to_move.append(item_id)
 
         if items_to_move:
             self.available_tree.selection_set(items_to_move)
