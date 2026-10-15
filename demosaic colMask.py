@@ -25,7 +25,7 @@ KEYWORDS = ["mos", "moz", "masi", "maz", "pixel", "censor", "ピクセル", "モ
 #   - 'Hidden/Universal Render Pipeline/SubpixelMorphologicalAntialiasing'
 #     -> 'pixelMorph', 'Antialias'
 # 같은 성격의 셰이더를 제외하고 싶으면 이 리스트에 키워드를 추가하면 된다.
-WHITE_LIST_PATTERN = ["Atmospher", "pixelMorph", "Antialias"]
+WHITE_LIST_PATTERN = ["Atmospher", "pixelMorph", "Antialias", "Subpixel"]
 # 스캔 대상 에셋 파일 확장자
 ASSET_EXTENSIONS = (".assets", ".bundle", ".unity3d", ".sharedAssets", ".resS", ".dat")
 # 아이콘 파일 (창 아이콘 / PyInstaller 실행 파일 아이콘에 사용)
