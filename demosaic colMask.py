@@ -13,12 +13,30 @@ import re
 from packaging import version
 from tkinter import ttk, filedialog, messagebox
 
+# 프로그램 버전 (릴리스 시 이 값만 올리면 창 타이틀과 실행 파일 이름에 반영됩니다)
+APP_VERSION = "1.05"
 # Mosaic 인식 키워드
 KEYWORDS = ["mos", "moz", "masi", "maz", "pixel", "censor", "ピクセル", "モザイク"]
-# white list
-WHITE_LIST = ["Hidden/HDRP/OpaqueAtmosphericScattering", "Hidden/PostProcessing/SubpixelMorphologicalAntialiasing"]  # 예시 화이트리스트
+# white list 키워드 패턴
+# 렌더 파이프라인/버전에 따라 화이트리스트 이름이 다양하게 변형되므로,
+# 후보 선정 시 제외할 키워드를 키워드 단위로 관리한다. (대소문자 무시, 부분 문자열 일치)
+#   - 'Hidden/HDRP/OpaqueAtmosphericScattering'                 -> 'Atmospher'
+#   - 'Hidden/PostProcessing/SubpixelMorphologicalAntialiasing' -> 'pixelMorph', 'Antialias'
+#   - 'Hidden/Universal Render Pipeline/SubpixelMorphologicalAntialiasing'
+#     -> 'pixelMorph', 'Antialias'
+# 같은 성격의 셰이더를 제외하고 싶으면 이 리스트에 키워드를 추가하면 된다.
+WHITE_LIST_PATTERN = ["Atmospher", "pixelMorph", "Antialias"]
 # 스캔 대상 에셋 파일 확장자
 ASSET_EXTENSIONS = (".assets", ".bundle", ".unity3d", ".sharedAssets", ".resS", ".dat")
+# 아이콘 파일 (창 아이콘 / PyInstaller 실행 파일 아이콘에 사용)
+ICON_FILE = "demosaic colMask.ico"
+
+
+def get_resource_path(filename):
+    """번들(PyInstaller) 또는 스크립트 디렉터리에서 리소스 파일의 절대 경로를 반환합니다."""
+    base_dir = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, filename)
+
 
 class DemosaicGUI:
     def __init__(self, master):
@@ -33,8 +51,9 @@ class DemosaicGUI:
         self.filter_var = tk.StringVar()
         self.backup_var = tk.BooleanVar(value=True)
 
-        master.title("Demosaic Tool (colMask)")
+        master.title(f"Demosaic Tool (colMask) v{APP_VERSION}")
         master.geometry("800x600")
+        self.apply_window_icon(master)
 
         # 상단 프레임 (경로 입력 및 스캔 버튼)
         top_frame = ttk.Frame(master, padding="10")
@@ -176,6 +195,21 @@ class DemosaicGUI:
 
         # 프로그램 종료 시 임시 폴더 정리
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def apply_window_icon(self, window):
+        """창(타이틀바/작업표시줄) 아이콘을 설정합니다.
+
+        - 소스 실행: 스크립트와 같은 폴더의 .ico 파일 사용
+        - 동결(frozen) 실행: 번들된 .ico 를 사용하고, 없으면 실행 파일에 내장된 아이콘 사용
+        """
+        try:
+            icon_path = get_resource_path(ICON_FILE)
+            if os.path.exists(icon_path):
+                window.iconbitmap(icon_path)
+            elif getattr(sys, "frozen", False):
+                window.iconbitmap(sys.executable)
+        except Exception as e:
+            print(f"Could not apply window icon: {e}")
 
     def process_log_queue(self):
         """
@@ -567,13 +601,22 @@ class DemosaicGUI:
     def move_to_available(self, event=None):
         self.move_item(self.selected_tree, self.available_tree)
 
+    @staticmethod
+    def is_whitelisted(shader_name):
+        """WHITE_LIST_PATTERN 의 키워드가 셰이더 이름에 포함되면 True를 반환합니다.
+
+        대소문자를 구분하지 않고 부분 문자열로 비교합니다.
+        """
+        lowered_name = shader_name.lower()
+        return any(pattern.lower() in lowered_name for pattern in WHITE_LIST_PATTERN)
+
     def auto_select_mosaic_shaders(self):
         items_to_move = []
         for item_id in self.available_tree.get_children():
             shader_name = self.available_tree.item(item_id)['values'][0]
-            # 키워드가 포함되어 있고, 화이트리스트에 없는 경우에만 추가
+            # 키워드가 포함되어 있고, 화이트리스트 키워드(WHITE_LIST_PATTERN)에 해당하지 않는 경우에만 추가
             if any(keyword in shader_name.lower() for keyword in KEYWORDS):
-                if shader_name not in WHITE_LIST:
+                if not self.is_whitelisted(shader_name):
                     items_to_move.append(item_id)
 
         if items_to_move:
@@ -696,6 +739,7 @@ class DemosaicGUI:
         win.title("Select Source Shader")
         win.geometry("600x400")
         win.transient(self.master)
+        self.apply_window_icon(win)
         win.grab_set()
 
         # 현재 타겟에 대한 제안 아이템을 찾습니다.
