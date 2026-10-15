@@ -1,0 +1,5 @@
+# -*- coding: utf-8 -*-
+# 빌드(실행 파일 생성)에만 필요한 패키지 (pip 이 이 파일을 UTF-8 로 읽도록 coding 선언 포함)
+pyinstaller
+# 아이콘 재생성(make_icon.py)에 필요. 실행 파일 자체에는 번들되지 않는다.
+pillow
