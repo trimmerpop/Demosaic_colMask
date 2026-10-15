@@ -7,6 +7,7 @@ import zipfile
 import tempfile
 import subprocess
 import threading
+from typing import Any
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from queue import Queue, Empty
 import re
@@ -45,8 +46,14 @@ class DemosaicGUI:
         # 데이터 변수들을 UI 위젯 생성보다 먼저 초기화합니다.
         self.all_shaders = [] # (shader_name, path_id, file_path) 튜플 리스트
         self.replacement_map = {} # {target_item_id: source_values}
-        self.apk_session_temp_dir = None # APK 모드에서 사용할 최상위 임시 디렉토리
-        self.apk_map = {} # {original_apk_path: temp_dir_for_apk}
+        # APK 모드에서 사용할 최상위 임시 디렉토리 (APK 모드가 아니면 None)
+        self.apk_session_temp_dir: str | None = None
+        self.apk_map: dict[str, str] = {} # {original_apk_path: temp_dir_for_apk}
+        # Treeview 위젯별 상태 저장소
+        # (ttk.Treeview 에 동적 속성을 추가하면 정적 분석에서 알 수 없는 속성으로 오류가 나므로,
+        #  위젯을 키로 하는 딕셔너리로 관리한다.)
+        self._tree_sort_info = {} # {tree_widget: {'col': 컬럼명, 'reverse': bool}}
+        self._tree_heading_texts = {} # {tree_widget: {컬럼명: 원본 헤더 텍스트}}
         self.path_var = tk.StringVar()
         self.filter_var = tk.StringVar()
         self.backup_var = tk.BooleanVar(value=True)
@@ -276,7 +283,21 @@ class DemosaicGUI:
             return None
 
         # 가장 최신 버전의 jar 파일 찾기
-        latest_jar = max(signer_jars, key=lambda f: version.parse(re.search(r'uber-apk-signer-(.*?)\.jar', f).group(1)))
+        def _jar_version_key(filename):
+            """'uber-apk-signer-{version}.jar' 파일명에서 버전을 추출합니다.
+
+            - 버전 패턴이 매칭되지 않거나 버전 형식이 올바르지 않으면
+              비교 가능한 최소 버전('0')을 반환하여 max() 선택 시 후순위가 되도록 합니다.
+            """
+            match = re.search(r'uber-apk-signer-(.*?)\.jar', filename)
+            if match is None:
+                return version.parse("0")
+            try:
+                return version.parse(match.group(1))
+            except version.InvalidVersion:
+                return version.parse("0")
+
+        latest_jar = max(signer_jars, key=_jar_version_key)
         return os.path.join(script_dir, latest_jar)
 
     def on_entry_focus_in(self, event):
@@ -350,14 +371,15 @@ class DemosaicGUI:
 
     def sort_treeview(self, tree, col, reverse):
         # 정렬 전에 모든 헤더에서 정렬 표시 제거
-        if not hasattr(tree, '_heading_texts'):
-            tree._heading_texts = {c: tree.heading(c, 'text') for c in tree.cget('columns') if c != 'fullpath'}
+        if tree not in self._tree_heading_texts:
+            self._tree_heading_texts[tree] = {c: tree.heading(c, 'text') for c in tree.cget('columns') if c != 'fullpath'}
+        heading_texts = self._tree_heading_texts[tree]
 
-        for c in tree._heading_texts:
-            tree.heading(c, text=tree._heading_texts[c])
+        for c in heading_texts:
+            tree.heading(c, text=heading_texts[c])
 
-        # 현재 정렬 상태를 위젯에 저장
-        tree.sort_info = {'col': col, 'reverse': reverse}
+        # 현재 정렬 상태를 저장 (위젯 동적 속성 대신 인스턴스 딕셔너리 사용)
+        self._tree_sort_info[tree] = {'col': col, 'reverse': reverse}
         
         data = [(tree.set(item, col), item) for item in tree.get_children('')]
         # 각 컬럼 타입에 맞는 정렬 함수 설정
@@ -373,7 +395,7 @@ class DemosaicGUI:
             tree.move(item, '', index)
         
         # 현재 정렬된 컬럼에만 표시 추가 (▲: 오름차순, ▼: 내림차순)
-        new_heading_text = f"{tree._heading_texts[col]} {'▼' if reverse else '▲'}"
+        new_heading_text = f"{heading_texts[col]} {'▼' if reverse else '▲'}"
         tree.heading(col, text=new_heading_text)
         tree.heading(col, command=lambda: self.sort_treeview(tree, col, not reverse))
 
@@ -434,8 +456,10 @@ class DemosaicGUI:
             # 2. 모드 결정 및 APK 처리
             target_path = self.path_var.get()
             
-            asset_files = []
-            apk_files = []
+            asset_files: list[str] = []
+            apk_files: list[str] = []
+            # isdir 분기에서만 채워지지만, 아래 Scan All 로직에서 참조하므로 미리 초기화한다.
+            all_files_in_dir: list[str] = []
             if os.path.isdir(target_path):
                 all_files_in_dir = [os.path.join(r, f) for r, _, fs in os.walk(target_path) for f in fs]
                 asset_files = [f for f in all_files_in_dir if f.lower().endswith(ASSET_EXTENSIONS)]
@@ -561,8 +585,8 @@ class DemosaicGUI:
                 self.available_tree.insert("", tk.END, values=(shader_name, path_id, os.path.basename(file_path), file_path))
         
         # 필터링 후, 기존 정렬 상태가 있다면 다시 적용
-        if hasattr(self.available_tree, 'sort_info'):
-            sort_info = self.available_tree.sort_info
+        sort_info = self._tree_sort_info.get(self.available_tree)
+        if sort_info:
             self.sort_treeview(self.available_tree, sort_info['col'], sort_info['reverse'])
 
     def move_item(self, src_tree, dest_tree):
@@ -570,6 +594,8 @@ class DemosaicGUI:
         if not selected_items:
             return
         
+        # 루프 안에서 마지막으로 옮겨진 항목의 ID (아래 제안 하이라이트에 사용)
+        new_item_id: str | None = None
         for item_id in selected_items:
             item_values = list(src_tree.item(item_id)['values'])
             
@@ -584,15 +610,15 @@ class DemosaicGUI:
                 del self.replacement_map[item_id]
         
         # 항목 추가가 모두 끝난 후, 대상 트리의 정렬 상태에 따라 다시 정렬합니다.
-        if hasattr(dest_tree, 'sort_info'):
-            sort_info = dest_tree.sort_info
+        sort_info = self._tree_sort_info.get(dest_tree)
+        if sort_info:
             # 현재 저장된 정렬 상태(컬럼, 방향)를 그대로 사용하여 다시 정렬합니다.
             self.sort_treeview(dest_tree, sort_info['col'], sort_info['reverse'])
         
         if src_tree == self.selected_tree:
             self.update_available_list()
             self.reset_and_reapply_suggestions()
-        elif dest_tree == self.selected_tree:
+        elif dest_tree == self.selected_tree and new_item_id is not None:
             self.find_and_highlight_suggestion(new_item_id)
 
     def move_to_selected(self, event=None):
@@ -749,8 +775,11 @@ class DemosaicGUI:
             tree.delete(*tree.get_children())
             filter_text = filter_var.get().lower()
             for item_id in self.available_tree.get_children():
-                values = self.available_tree.item(item_id, 'values')
-                tags = self.available_tree.item(item_id, 'tags')
+                # Treeview.item(item_id, 'values'/'tags')의 반환 타입은
+                # 'tuple[...] | Literal[""]' 이므로, insert()에 전달하기 전에
+                # 항상 시퀀스가 되도록 tuple()로 정규화한다. (런타임 동작은 동일)
+                values = tuple(self.available_tree.item(item_id, 'values'))
+                tags = tuple(self.available_tree.item(item_id, 'tags'))
                 if filter_text in values[0].lower() or filter_text in values[3].lower():
                     tree.insert("", "end", iid=item_id, values=values, tags=tags)
             
@@ -823,6 +852,10 @@ class DemosaicGUI:
         # 창이 닫힐 때까지 기다립니다.
         self.master.wait_window(win)
 
+        # 임시 트리는 창이 닫히면서 파괴되므로, 위젯을 키로 사용하는 상태도 함께 정리합니다.
+        self._tree_sort_info.pop(tree, None)
+        self._tree_heading_texts.pop(tree, None)
+
     def start_processing(self):
         def _processing_task():
             selected_items = self.selected_tree.get_children()
@@ -890,7 +923,10 @@ class DemosaicGUI:
                 # (이 부분은 현재 로직에서는 shaders_to_process에 이미 포함되므로 생략 가능하나, 안정성을 위해 추가)
 
             # APK 모드인 경우, 리패키징 수행
-            if self.apk_map:
+            # self.apk_session_temp_dir 는 Optional[str] 이므로, 지역 변수로 받아
+            # None 이 아님을 확인한 뒤 사용한다. (정적 분석기 타입 좁히기 포함)
+            session_temp_dir = self.apk_session_temp_dir
+            if self.apk_map and session_temp_dir:
                 print("\nStarting APK repacking process...")
                 for original_apk_path, temp_dir in self.apk_map.items():
                     print(f"Repacking for {os.path.basename(original_apk_path)}...")
@@ -909,7 +945,7 @@ class DemosaicGUI:
                         }
 
                         # 2. 새로운 임시 APK를 만들면서 수정된 파일만 교체
-                        unsigned_apk_path = os.path.join(self.apk_session_temp_dir, f"temp_{os.path.basename(original_apk_path)}")
+                        unsigned_apk_path = os.path.join(session_temp_dir, f"temp_{os.path.basename(original_apk_path)}")
                         print(f"Rebuilding APK with {len(modified_files_map)} modified files...")
                         
                         with zipfile.ZipFile(original_apk_path, 'r') as zin:
@@ -1007,7 +1043,7 @@ class DemosaicGUI:
                     break
             
             if modified:
-                self.save_modified_file(target_file, env_target.file.save(packer='original'))
+                self.save_modified_file(target_file, self._serialize_env(env_target))
         except Exception as e:
             print(f"    -> [Error] Failed to execute replacement: {e}")
 
@@ -1053,9 +1089,22 @@ class DemosaicGUI:
 
                 # with 블록이 끝나면 파일 핸들이 닫히므로, 닫힌 후에 저장 작업을 수행합니다.
                 if modified:
-                    self.save_modified_file(path, env.file.save(packer='original'))
+                    self.save_modified_file(path, self._serialize_env(env))
         except Exception as e:
             print(f"[✘] Failed to process or save {path}: {e}\n")
+
+    @staticmethod
+    def _serialize_env(env) -> bytes:
+        """UnityPy Environment 를 원본 packer 설정으로 직렬화한 바이트를 반환합니다.
+
+        UnityPy 는 Environment.file 을
+        Union[SerializedFile, BundleFile, WebFile, EndianBinaryReader] 로 선언하지만
+        실제로는 File 계열 객체(SerializedFile/BundleFile/WebFile)이고, 그중
+        EndianBinaryReader 에는 save() 가 없어 정적 분석기가 속성을 찾지 못합니다.
+        따라서 분석기를 위해 Any 로 취급한다. (런타임 동작은 동일)
+        """
+        file_obj: Any = env.file
+        return file_obj.save(packer='original')
 
     def save_modified_file(self, path, file_bytes):
         """파일을 백업하고 저장하는 공통 로직"""
